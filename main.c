@@ -1,175 +1,104 @@
+#include <sys/uio.h>
+#include <stddef.h>
+#include <string.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <linux/types.h>
+#include <errno.h>
+#include <getopt.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
 #include <bluetooth/hci_lib.h>
 
-#define __packed __attribute__((packed))
-/* HCI data types */                                                 
-#define HCI_COMMAND_PKT     0x01            
-#define HCI_ACLDATA_PKT     0x02
-#define HCI_SCODATA_PKT     0x03
-#define HCI_EVENT_PKT       0x04
-#define HCI_DIAG_PKT        0xf0
-#define HCI_VENDOR_PKT      0xff
+#include "conn.h"
+#include "task_sched.h"
 
-struct hci_command_hdr {
-	__le16  opcode;     /* OCF & OGF */         
-	__u8    plen;                                     
-} __packed;     
-
-struct hci_event_hdr {                      
-	__u8    evt;                                      
-	__u8    plen;
-} __packed;
-
-struct hci_acl_hdr {
-	__le16  handle;     /* Handle & Flags(PB, BC) */
-	__le16  dlen;  
-} __packed;
-
-struct hci_sco_hdr {                                    
-	__le16  handle;
-	__u8    dlen;
-} __packed;
-
-static int open_channel(uint16_t index)
+static void usage(void)
 {
-	int fd;
-	int on = 1;
-	struct sockaddr_hci addr;
-
-	printf("Opening user channel for hci%u\n", index);
-
-	fd = socket(PF_BLUETOOTH, SOCK_RAW | SOCK_CLOEXEC, BTPROTO_HCI);
-	if (fd < 0) {
-		perror("Failed to open Bluetooth socket");
-		return -1;
-	}
-
-	memset(&addr, 0, sizeof(addr));
-	addr.hci_family = AF_BLUETOOTH;
-	addr.hci_dev = index;
-	addr.hci_channel = HCI_CHANNEL_RAW;//HCI_CHANNEL_USER;
-
-	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0) {
-		close(fd);
-		perror("setsockopt");
-		return -1;
-	}
-
-	if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-		close(fd);
-		perror("Failed to bind Bluetooth socket");
-		return -1;
-	}
-
-	return fd;
+	printf("Usage: btmitm -C {index,bdaddr} -D {index,bdaddr} -c\n");
 }
 
-static void hci_event_packet(struct hci_event_hdr *hdr)
+#define CONNECT_SLAVE 0x01
+
+int main(int argc, char **argv)
 {
-	switch (hdr->evt) {
-	default:
-		printf("unhandle evt: %x, %d\n", hdr->evt, hdr->plen);
-	break;
-	}
-}
+	int rsize, c;
+	int flags = 0;
+	char bstr[20];
 
-static void hci_acldata_packet(struct hci_acl_hdr *hdr)
-{
-}
+	struct conn *ctrl, *adapter;
 
-static void hci_scodata_packet(struct hci_sco_hdr *hdr)
-{
-}
+	ctrl = conn_get_control();
+	adapter = conn_get_adapter();
 
-static void hci_init(int fd)
-{
-	static const uint8_t eir[] = {
-		0x05,0x03,0x24,0x11,0x00,0x12,0x1f,0x09,
-		0x57,0x69,0x72,0x65,0x6c,0x65,0x73,0x73,
-		0x20,0x63,0x6f,0x6e,0x74,0x72,0x6f,0x6c,
-		0x6c,0x65,0x72,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x09,0x10,
-		0x02,0x00,0x2c,0x2e,0x06,0x00,0x00,0x01,
-		0x2d,0xe0,0xa1,0x17,0xdd,0x03,0xa8,0x00,
-		0x00,0x00,0x00,0x18,0x00,0x00,0x00,0x53,
-		0x2d,0xe0,0xa1,0x02,0x00,0x00,0x00,0x1c,
-		0x01,0xc0,0xa1,0x04,0xa8,0xa1,0x25,0xff,
-		0xff,0xbf,0x1d,0x02,0x00,0x00,0x00,0x1c,
-		0x01,0xc0,0xa1,0x01,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-	};
-
-	hci_write_class_of_dev(fd, 0x002508, 2000);
-	hci_write_local_name(fd, "Wireless controller", 2000);
-	hci_write_inquiry_mode(fd, 2, 2000);
-	hci_write_ext_inquiry_response(fd, 1, (uint8_t*)eir, 2000);
-	hci_send_cmd(fd, OGF_HOST_CTL, OCF_WRITE_SCAN_ENABLE, 1, (uint8_t [1]){3});
-}
-
-int main(void)
-{
-	int fd;
-	int rsize;
-	uint8_t buf[3];
-
-	fd = open_channel(0);
-	if(fd < 0)
-		return EXIT_FAILURE;
-
-	hci_init(fd);
-
-	while (true) {
-		rsize = read(fd, buf, sizeof(buf));
-
-		if(rsize < 0)
-			return EXIT_FAILURE;
-
-		switch (buf[0]) {
-		case HCI_EVENT_PKT:
-			if(rsize < sizeof(struct hci_event_hdr))
+	while (-1 != (c = getopt(argc, argv, "C:D:c"))) {
+		switch (c) {
+		case 'C':
+			sscanf(optarg, "%d,%s", &ctrl->adapter, bstr);
+			if (str2ba(bstr, &ctrl->bdaddr)) {
+				usage();
 				return EXIT_FAILURE;
-			hci_event_packet((struct hci_event_hdr *)(buf + 1));
-		break;
-		case HCI_ACLDATA_PKT:
-			if(rsize < sizeof(struct hci_acl_hdr))
-				return EXIT_FAILURE;
-			hci_acldata_packet((struct hci_acl_hdr*)(buf + 1));
-		break;
-		case HCI_SCODATA_PKT:
-			if(rsize < sizeof(struct hci_sco_hdr))
-				return EXIT_FAILURE;
-			hci_scodata_packet((struct hci_sco_hdr*)(buf + 1));
+			}
+			printf("control(%d) address: %s\n", ctrl->adapter, batostr(&ctrl->bdaddr));
 		break;
 
+		case 'c':
+			flags = CONNECT_SLAVE;
+		break;
+
+		case 'D':
+			sscanf(optarg, "%d,%s", &adapter->adapter, bstr);
+			if (str2ba(bstr, &adapter->bdaddr)) {
+				usage();
+				return EXIT_FAILURE;
+			}
+			printf("adapter(%d) address: %s\n", adapter->adapter, batostr(&adapter->bdaddr));
+		break;
 		default:
+			usage();
+			return EXIT_FAILURE;
 		break;
 		}
 	}
 
-	close(fd);
+
+	conn_init(ctrl, false);
+	conn_init(adapter, true);
+	link_key_load();
+
+	if (flags & CONNECT_SLAVE)
+		conn_connect_device(ctrl);
+
+	while (true) {
+		int rv, max;
+		fd_set set;
+		struct timeval tv;
+
+		tv.tv_sec = 0;
+		tv.tv_usec = 1 * 10;
+
+		FD_ZERO(&set);
+		FD_SET(ctrl->dd, &set);
+		FD_SET(adapter->dd, &set);
+
+		max = (ctrl->dd > adapter->dd ? ctrl->dd : adapter->dd) + 1;
+
+		rv = select(max, &set, NULL, NULL, &tv);
+
+		if (rv > 0) {
+
+			if (FD_ISSET(ctrl->dd, &set)) {
+				conn_hci_handler(ctrl);
+			}
+
+			if (FD_ISSET(adapter->dd, &set)) {
+				conn_hci_handler(adapter);
+			}
+		}
+
+		task_sched();
+	}
 
 	return EXIT_SUCCESS;
 }
